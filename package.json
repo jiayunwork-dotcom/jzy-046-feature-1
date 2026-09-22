@@ -1,0 +1,17 @@
+{
+  "name": "regex-visualizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "浏览器内运行的正则可视化调试器：AST、Thompson NFA、子集构造 DFA、最小化、匹配与回溯逐帧动画",
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix client install",
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "build": "npm --prefix client run build",
+    "start": "npm --prefix server start",
+    "test": "npm --prefix server test"
+  }
+}

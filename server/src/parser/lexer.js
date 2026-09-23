@@ -60,6 +60,46 @@ function readEscape(src, i, inClass) {
       2
     );
   }
+  if (ch === 'k') {
+    if (inClass) {
+      throw new RegexSyntaxError(`未知的转义序列：\\${ch}（具名反向引用 \\k<名字> 不能写在字符类内）`, slashPos, 2);
+    }
+    // \k<name>：名字内容交给解析器校验（空名/非法名/不存在都在解析层报错）
+    if (src[i + 2] !== '<') {
+      throw new RegexSyntaxError(
+        '具名反向引用的写法是 \\k<组名>，反斜杠 k 之后缺少 <组名>',
+        slashPos,
+        2
+      );
+    }
+    const gt = src.indexOf('>', i + 3);
+    if (gt === -1) {
+      throw new RegexSyntaxError('具名反向引用缺少闭合的 >：应为 \\k<组名>', slashPos, src.length - slashPos);
+    }
+    return { kind: 'backrefName', name: src.slice(i + 3, gt), pos: slashPos, end: gt + 1 };
+  }
+  if (isDigit(cp)) {
+    if (inClass) {
+      throw new RegexSyntaxError(
+        `字符类内不能写反向引用 \\${ch}（反向引用必须位于字符类之外）`,
+        slashPos,
+        2
+      );
+    }
+    if (ch === '0') {
+      // 与既有约定保持一致：\0 永远是 NUL 字符，后续数字按字面量处理
+      return { kind: 'litcp', cp: SIMPLE_ESCAPES[0], pos: slashPos, end: i + 2 };
+    }
+    // 收走整段数字；解析器按“能对上现有分组号的最长前缀”解析，
+    // 用不掉的尾数作为字面数字（与 PCRE 的消歧惯例一致）。
+    let j = i + 1;
+    let digits = '';
+    while (j < src.length && isDigit(src.codePointAt(j))) {
+      digits += src[j];
+      j += 1;
+    }
+    return { kind: 'backrefNum', digits, pos: slashPos, end: j };
+  }
   if (ch === 'u' || ch === 'x') {
     throw new RegexSyntaxError(
       `暂不支持 \\${ch}  Unicode/十六进制转义，请直接写出字符或使用区间`,
@@ -172,6 +212,8 @@ export function tokenize(src) {
       const esc = readEscape(src, i, false);
       if (esc.kind === 'builtin') {
         tokens.push({ kind: 'builtin', name: esc.name, negated: esc.negated, set: esc.set, pos: esc.pos, end: esc.end });
+      } else if (esc.kind === 'backrefName' || esc.kind === 'backrefNum') {
+        tokens.push(esc);
       } else {
         tokens.push({ kind: 'literal', cp: esc.cp, set: singleton(esc.cp), pos: i, end: esc.end });
       }
@@ -204,6 +246,25 @@ export function tokenize(src) {
       if (src.startsWith('(?:', i)) {
         tokens.push({ kind: 'lparen', capture: false, pos: i, end: i + 3 });
         i += 3;
+      } else if (src.startsWith('(?<', i)) {
+        // (?<name>...)：找出配对的 >，组名合法性由解析器校验
+        const gt = src.indexOf('>', i + 3);
+        if (gt === -1) {
+          throw new RegexSyntaxError('命名捕获组 (?<名字>...) 缺少闭合的 >', i, src.length - i);
+        }
+        // (?<= 后顾 / (?<! 后顾否定：本工具不支持，单独给出提示
+        if (src[i + 3] === '=') {
+          throw new RegexSyntaxError('暂不支持 (?<= 后顾断言，本工具的锚点只有 ^ 和 $', i, 4);
+        }
+        if (src[i + 3] === '!') {
+          throw new RegexSyntaxError('暂不支持 (?<! 后顾否定断言，本工具的锚点只有 ^ 和 $', i, 4);
+        }
+        tokens.push({ kind: 'lparen', capture: true, named: true, name: src.slice(i + 3, gt), pos: i, end: gt + 1 });
+        i = gt + 1;
+      } else if (src.startsWith('(?=', i) || src.startsWith('(?!', i)) {
+        throw new RegexSyntaxError('暂不支持前瞻断言 (?= / (?!，本工具的锚点只有 ^ 和 $', i, 3);
+      } else if (src[i + 1] === '?') {
+        throw new RegexSyntaxError(`无法识别的分组形式 ${JSON.stringify(src.slice(i, i + 3))}：支持 (...)、(?:...)、(?<名字>...)`, i, 3);
       } else {
         tokens.push({ kind: 'lparen', capture: true, pos: i, end: i + 1 });
         i += 1;

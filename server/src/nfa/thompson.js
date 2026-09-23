@@ -10,6 +10,7 @@
 //  - 坐标在构造完成后按最长路径分层 + 重心排序统一计算。
 
 import { edgeLabel } from '../charset.js';
+import { NonRegularPatternError, findBackrefs } from '../regularity.js';
 
 export const NFA_STATE_LIMIT = 4000;
 
@@ -90,6 +91,11 @@ export class ThompsonBuilder {
   }
 
   build() {
+    // 硬门：反向引用不是正则语言，Thompson 构造无法表达“与先前捕获相同”
+    // 的相等约束；绝不能把它当普通节点悄悄构出语义错误的自动机。
+    const refs = findBackrefs(this.ast);
+    if (refs.length) throw new NonRegularPatternError(refs);
+
     const start = this.addState(this.ast.id, 'start');
     this.emit(this.ast.id, 'init', [start], [], {
       description: '创建唯一的起始状态（图最左侧），所有路径都从它出发',

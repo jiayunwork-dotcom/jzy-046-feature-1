@@ -13,6 +13,7 @@ const TYPE_LABEL = {
   char: 'Char 字面字符',
   charClass: 'CharClass 字符类',
   anchor: 'Anchor 锚点',
+  backref: 'Backref 反向引用',
   epsilon: 'ε 空',
 };
 
@@ -29,6 +30,9 @@ function describeLeaf(node) {
     return `[${node.negated ? '^' : ''}…] ${node.set.length} 段区间`;
   }
   if (node.type === 'anchor') return node.dir === 'start' ? '^ 行首' : '$ 行尾';
+  if (node.type === 'backref') {
+    return node.refType === 'name' ? `\\k<${node.refValue}>` : `\\${node.refValue}`;
+  }
   if (node.type === 'epsilon') return '空分支';
   return null;
 }
@@ -71,7 +75,14 @@ function NodeView({ node, depth, hoverId, setHoverId, onHoverSpan, defaultOpen }
         <span className="ast-type">{TYPE_LABEL[node.type] || node.type}</span>
         {node.type === 'repeat' && <span className="ast-badge">{quantifierText(node)}</span>}
         {node.type === 'group' && (
-          <span className="ast-badge">{node.capture ? `捕获 #${node.index}` : '非捕获'}</span>
+          <span className="ast-badge">
+            {node.capture ? `捕获 #${node.index}${node.name ? ` ${node.name}` : ''}` : '非捕获'}
+          </span>
+        )}
+        {node.type === 'backref' && (
+          <span className="ast-badge backref-badge">
+            {node.refType === 'name' ? `→ 组 ${node.name ? `#${node.index} ` : ''}"${node.refValue}"` : `→ 组 #${node.index ?? '?'}`}
+          </span>
         )}
         {node.type === 'alternation' && <span className="ast-badge">{node.branches.length} 分支</span>}
         {describeLeaf(node) && <span className="ast-leaf">{describeLeaf(node)}</span>}

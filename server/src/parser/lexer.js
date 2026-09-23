@@ -19,6 +19,13 @@ export class RegexSyntaxError extends Error {
   }
 }
 
+// 组名标识符规则：非空，首字符为字母或下划线，其后可跟字母/数字/下划线（ASCII）。
+const GROUP_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export function isValidGroupName(name) {
+  return GROUP_NAME_RE.test(name);
+}
+
 const SIMPLE_ESCAPES = {
   t: 0x09,
   n: 0x0a,
@@ -67,11 +74,49 @@ function readEscape(src, i, inClass) {
       2
     );
   }
+  // 反向引用：\1 ... \99（在解析阶段校验分组是否存在）
+  if (isDigit(cp) && ch !== '0') {
+    if (inClass) {
+      throw new RegexSyntaxError(
+        '字符类内部不能使用反向引用（\\1 这样的写法只属于分组匹配，不是一个字符集合）',
+        slashPos,
+        2
+      );
+    }
+    let j = i + 1;
+    while (j < src.length && isDigit(src.charCodeAt(j))) j += 1;
+    return { kind: 'backref', refType: 'number', refValue: Number(src.slice(i + 1, j)), pos: slashPos, end: j };
+  }
+  // 具名反向引用：\k<name>
+  if (ch === 'k') {
+    if (inClass) {
+      throw new RegexSyntaxError('字符类内部不能使用反向引用 \\k<name>', slashPos, 2);
+    }
+    if (src[i + 2] !== '<') {
+      throw new RegexSyntaxError(
+        '具名反向引用格式应为 \\k<name>：\\k 后面缺少 <名字>',
+        slashPos,
+        Math.min(3, src.length - i)
+      );
+    }
+    const close = src.indexOf('>', i + 3);
+    if (close === -1) {
+      throw new RegexSyntaxError('具名反向引用没有闭合：\\k<name> 缺少结尾的 >', slashPos, src.length - i);
+    }
+    const name = src.slice(i + 3, close);
+    if (!isValidGroupName(name)) {
+      throw new RegexSyntaxError(
+        `具名反向引用的组名 "${name}" 非法：组名不能为空，且只能以字母或下划线开头，后跟字母、数字或下划线`,
+        slashPos,
+        close + 1 - i
+      );
+    }
+    return { kind: 'backref', refType: 'name', refValue: name, pos: slashPos, end: close + 1 };
+  }
   // 标点转义：按字面处理（\. \\ \+ \^ ...）
   if (!isLetter(cp) && !isDigit(cp)) {
     return { kind: 'litcp', cp, pos: slashPos, end: i + 2 };
   }
-  void inClass;
   throw new RegexSyntaxError(`未知的转义序列：\\${ch}`, slashPos, 2);
 }
 
@@ -172,6 +217,8 @@ export function tokenize(src) {
       const esc = readEscape(src, i, false);
       if (esc.kind === 'builtin') {
         tokens.push({ kind: 'builtin', name: esc.name, negated: esc.negated, set: esc.set, pos: esc.pos, end: esc.end });
+      } else if (esc.kind === 'backref') {
+        tokens.push({ kind: 'backref', refType: esc.refType, refValue: esc.refValue, pos: esc.pos, end: esc.end });
       } else {
         tokens.push({ kind: 'literal', cp: esc.cp, set: singleton(esc.cp), pos: i, end: esc.end });
       }
@@ -204,6 +251,41 @@ export function tokenize(src) {
       if (src.startsWith('(?:', i)) {
         tokens.push({ kind: 'lparen', capture: false, pos: i, end: i + 3 });
         i += 3;
+      } else if (src.startsWith('(?<', i)) {
+        // 命名捕获组 (?<name>...)；(?<= / (?<! 是环视，本工具不支持
+        if (src[i + 3] === '=' || src[i + 3] === '!') {
+          throw new RegexSyntaxError(
+            `暂不支持环视（${src[i + 3] === '=' ? '(?<=' : '(?<!'}...）：本工具支持的锚点只有 ^ 和 $`,
+            i,
+            4
+          );
+        }
+        // 词法只消费到 name 后的 >，组体照常继续词法
+        const close = src.indexOf('>', i + 3);
+        if (close === -1) {
+          throw new RegexSyntaxError(
+            '命名捕获组格式应为 (?<name>...)：缺少结尾的 >',
+            i,
+            Math.min(src.length - i, 4)
+          );
+        }
+        const name = src.slice(i + 3, close);
+        if (!isValidGroupName(name)) {
+          throw new RegexSyntaxError(
+            `命名捕获组的组名 "${name}" 非法：组名不能为空，不能以数字开头，只能由字母、数字、下划线组成且首字符为字母或下划线`,
+            i,
+            close + 1 - i
+          );
+        }
+        tokens.push({ kind: 'lparen', capture: true, name, pos: i, end: close + 1 });
+        i = close + 1;
+      } else if (src.startsWith('(?', i)) {
+        // (? 开头但不是 (?: 也不是 (?<...>：本工具子集不支持
+        throw new RegexSyntaxError(
+          `不支持的分组语法 "${src.slice(i, Math.min(i + 3, src.length))}"：本工具支持捕获组 (...)、非捕获组 (?:...) 与命名捕获组 (?<name>...)`,
+          i,
+          Math.min(2, src.length - i)
+        );
       } else {
         tokens.push({ kind: 'lparen', capture: true, pos: i, end: i + 1 });
         i += 1;

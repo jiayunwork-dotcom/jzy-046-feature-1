@@ -62,6 +62,11 @@ export default function App() {
   useEffect(() => {
     if (!compileData) { setMatchData(null); return; }
     let cancelled = false;
+    // 含反向引用时，NFA/DFA/minDFA 对该模式无意义：强制回到回溯引擎
+    if (compileData.nonDeterminizable && engine !== 'backtracking') {
+      setEngine('backtracking');
+      return;
+    }
     api
       .match(pattern, input, engine, mode)
       .then((res) => { if (!cancelled) { setMatchData(res); setMatchErr(null); } })
@@ -69,18 +74,21 @@ export default function App() {
     return () => { cancelled = true; };
   }, [compileData, pattern, input, engine, mode]);
 
+  const blocked = !!compileData?.nonDeterminizable;
+
   const matchGraph = useMemo(() => {
-    if (!compileData) return null;
+    if (!compileData || blocked) return null;
     if (engine === 'backtracking' || engine === 'nfa') return compileData.nfa;
     if (engine === 'dfa') return compileData.dfa;
     if (engine === 'minDFA') return compileData.minDFA;
     return null;
-  }, [compileData, engine]);
+  }, [compileData, engine, blocked]);
 
   // 贪婪/懒惰对比需要两张按不同全局模式构造的 NFA（后端接口内部自行构造，
   // 画布只需要图结构；这里复用 compile 的贪婪 NFA 与按懒惰重取的数据）。
-  const nfaLazy = useMemo(() => compileData?.nfa, [compileData]); // 结构相同，仅边顺序差异在引擎内部翻转
-  const nfaGreedy = compileData?.nfa;
+  // 含反向引用时没有 NFA 图，传 null，由 MatchPlayer 切换到捕获栈轨迹视图。
+  const nfaLazy = blocked ? null : compileData?.nfa;
+  const nfaGreedy = blocked ? null : compileData?.nfa;
 
   const loadExample = ({ pattern: p, test }) => {
     setPattern(p);
@@ -133,9 +141,14 @@ export default function App() {
           <div className="tabs construct-tabs">
             <Tab id="nfa" cur={phase} set={setPhase} label="① Thompson 构造 NFA" />
             <Tab id="dfa" cur={phase} set={setPhase} label="② 子集构造 DFA" />
-            <Tab id="min" cur={phase} set={setPhase} label="③ DFA 最小化" disabled={!compileData?.minDFA} />
+            <Tab id="min" cur={phase} set={setPhase} label="③ DFA 最小化" disabled={blocked || !compileData?.minDFA} />
             <div className="grow" />
-            {compileData?.verification && (
+            {blocked && (
+              <span className="pill bad" title="反向引用不是正则语言，NFA/DFA 无法表达">
+                含反向引用 · 自动机不可确定化 ⛔
+              </span>
+            )}
+            {!blocked && compileData?.verification && (
               <span className={`pill ${compileData.verification.allConsistent ? 'ok' : 'bad'}`}>
                 {compileData.verification.allConsistent ? '三机结论一致 ✓' : '一致性校验失败 ✗'}
               </span>
@@ -162,16 +175,26 @@ export default function App() {
                       ['nfa', 'NFA 子集模拟'],
                       ['dfa', 'DFA'],
                       ['minDFA', '最小 DFA'],
-                    ].map(([id, label]) => (
-                      <button
-                        key={id}
-                        className={`seg ${engine === id ? 'active' : ''}`}
-                        disabled={id === 'minDFA' && !compileData?.minDFA}
-                        onClick={() => setEngine(id)}
-                      >
-                        {label}
-                      </button>
-                    ))}
+                    ].map(([id, label]) => {
+                      const unavailable =
+                        (id === 'minDFA' && !blocked && !compileData?.minDFA) ||
+                        (id !== 'backtracking' && blocked);
+                      const titleTip = blocked && id !== 'backtracking'
+                        ? '该模式含反向引用，超出有限自动机表达能力，此引擎不可用'
+                        : undefined;
+                      return (
+                        <button
+                          key={id}
+                          className={`seg ${engine === id ? 'active' : ''}`}
+                          disabled={unavailable}
+                          title={titleTip}
+                          onClick={() => setEngine(id)}
+                        >
+                          {label}
+                          {blocked && id !== 'backtracking' && <span className="seg-na">不可用</span>}
+                        </button>
+                      );
+                    })}
                   </div>
                   {engine === 'backtracking' && (
                     <div className="mode-switch">
@@ -186,19 +209,28 @@ export default function App() {
                     placeholder="测试字符串"
                   />
                 </div>
+                {blocked && (
+                  <div className="warn-box engine-blocked-note">
+                    本模式含反向引用（{compileData.backrefs.map((b) => b.ref).join('、')}）：
+                    NFA 子集模拟 / DFA / 最小 DFA 均不适用（反向引用依赖捕获记忆，不是正则语言），
+                    只能使用回溯引擎；下方回放中紫色步骤即“从捕获栈取值比对”。
+                  </div>
+                )}
                 {matchErr && <div className="error-banner">{matchErr}</div>}
                 {matchData && (
                   <MatchPlayer
                     graph={matchGraph}
-                    kind={engine === 'backtracking' ? 'backtracking' : engine}
+                    kind={blocked ? 'backtracking-ref' : engine === 'backtracking' ? 'backtracking' : engine}
                     frames={matchData.frames}
                     metrics={matchData.metrics}
                     input={input}
                     result={matchData.result}
                     engineLabel={
-                      engine === 'backtracking'
-                        ? `回溯引擎 · ${mode === 'greedy' ? '贪婪' : '懒惰'}`
-                        : engine === 'nfa' ? 'NFA 子集模拟（活跃状态集合）' : engine === 'dfa' ? 'DFA（唯一当前状态）' : '最小 DFA'
+                      blocked
+                        ? `回溯引擎（AST 直接匹配，支持反向引用）· ${mode === 'greedy' ? '贪婪' : '懒惰'}`
+                        : engine === 'backtracking'
+                          ? `回溯引擎 · ${mode === 'greedy' ? '贪婪' : '懒惰'}`
+                          : engine === 'nfa' ? 'NFA 子集模拟（活跃状态集合）' : engine === 'dfa' ? 'DFA（唯一当前状态）' : '最小 DFA'
                     }
                   />
                 )}
@@ -212,7 +244,7 @@ export default function App() {
                   <input className="test-input" value={input} onChange={(e) => setInput(e.target.value)} />
                   <div className="muted small">同一条正则、同一个串；注意两条 ε 选择边的尝试顺序相反。</div>
                 </div>
-                <ModeCompare pattern={pattern} input={input} nfaGreedy={nfaGreedy} nfaLazy={nfaLazy} />
+                <ModeCompare pattern={pattern} input={input} nfaGreedy={nfaGreedy} nfaLazy={nfaLazy} blocked={blocked} />
               </>
             )}
           </div>

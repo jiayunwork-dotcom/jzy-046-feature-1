@@ -6,7 +6,17 @@ import { matchBacktracking } from './match/backtracker.js';
 import { matchNFA } from './match/nfa-sim.js';
 import { matchDFA } from './match/dfa-sim.js';
 
-export function checkConsistency({ nfa, dfa, minDFA }, strings) {
+export function checkConsistency(compiled, strings) {
+  // 含反向引用的模式没有 NFA/DFA：三套自动机一致性这一判据本身不适用。
+  if (compiled.nonDeterminizable) {
+    return {
+      allConsistent: true,
+      applicable: false,
+      reason: '模式含反向引用，超出有限自动机表达能力，NFA/DFA 未构造，无一致性可校验；该模式只能由回溯引擎执行',
+      cases: [],
+    };
+  }
+  const { nfa, dfa, minDFA } = compiled;
   const sameSpan = (a, b) =>
     a.matched === b.matched && (a.result?.start ?? null) === (b.result?.start ?? null) && (a.result?.end ?? null) === (b.result?.end ?? null);
 

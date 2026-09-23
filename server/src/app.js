@@ -12,11 +12,24 @@ import { buildNFA, NFA_STATE_LIMIT, ThompsonBuildError } from './nfa/thompson.js
 import { buildDFA, DEFAULT_DFA_LIMIT, SubsetBuildError } from './dfa/subset.js';
 import { minimizeDFA } from './dfa/minimize.js';
 import { matchBacktracking } from './match/backtracker.js';
+import { matchAstBacktracking } from './match/ast-backtracker.js';
 import { matchNFA } from './match/nfa-sim.js';
 import { matchDFA } from './match/dfa-sim.js';
 import { analyzePattern } from './analysis/catastrophic.js';
 import { checkConsistency } from './consistency.js';
+import { hasBackreferences } from './features.js';
 import { EXAMPLES, listExamples, getExample } from './examples/index.js';
+
+/** 引擎对当前模式不可用时抛出（例如拿 NFA 模拟含反向引用的模式） */
+class EngineUnavailableError extends Error {
+  constructor(message, { engine, reason }) {
+    super(message);
+    this.name = 'EngineUnavailableError';
+    this.engine = engine;
+    this.reason = reason;
+    this.statusCode = 409;
+  }
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = process.env.STATIC_DIR
@@ -45,6 +58,13 @@ export function createApp() {
         res.status(400).json(errorBody(err));
         return;
       }
+      if (err instanceof EngineUnavailableError) {
+        res.status(err.statusCode).json({
+          ok: false,
+          error: { message: err.message, kind: err.name, engine: err.engine, reason: err.reason },
+        });
+        return;
+      }
       req.app.locals.logger?.(err);
       res.status(500).json({ ok: false, error: { message: err.message, kind: err.name } });
     }
@@ -64,6 +84,7 @@ export function createApp() {
   }));
 
   // 全量编译：ast + nfa + dfa + minDFA + 一致性自检
+  // 含反向引用时 nfa/dfa/minDFA 为 null，nonDeterminizable 说明原因
   app.post('/api/compile', wrap((req, res) => {
     const { pattern, dfaLimit = DEFAULT_DFA_LIMIT, verifyStrings } = req.body;
     if (typeof pattern !== 'string') throw new RegexSyntaxError('pattern 必须是字符串', 0);
@@ -75,42 +96,73 @@ export function createApp() {
     res.json({
       ok: true,
       ast: compiled.ast,
-      nfa: graphPayload('nfa', compiled.nfa),
-      dfa: graphPayload('dfa', compiled.dfa),
+      nonDeterminizable: compiled.nonDeterminizable,
+      backrefs: compiled.backrefs,
+      nfa: compiled.nfa ? graphPayload('nfa', compiled.nfa) : null,
+      dfa: compiled.dfa ? graphPayload('dfa', compiled.dfa) : null,
       minDFA: compiled.minDFA ? graphPayload('minDFA', compiled.minDFA) : null,
-      dfaTruncated: compiled.dfa.truncated,
-      dfaTruncationDetail: compiled.dfa.truncationDetail,
+      dfaTruncated: compiled.dfa ? compiled.dfa.truncated : false,
+      dfaTruncationDetail: compiled.dfa ? compiled.dfa.truncationDetail : null,
       minError: compiled.minError,
       verification,
     });
   }));
 
   // 匹配：engine = backtracking | nfa | dfa | minDFA
+  // 含反向引用的模式只有 backtracking 可用，选择其余引擎返回 409 并说明原因
   app.post('/api/match', wrap((req, res) => {
     const { pattern, input = '', engine = 'nfa', mode = 'greedy' } = req.body;
     if (typeof pattern !== 'string') throw new RegexSyntaxError('pattern 必须是字符串', 0);
+    const text = String(input);
+    const ast = parsePattern(pattern);
+
+    if (hasBackreferences(ast)) {
+      if (engine !== 'backtracking') {
+        throw new EngineUnavailableError(
+          `引擎 ${engine} 对该正则不可用：模式含反向引用，反向引用不是正则语言，无法构造/模拟有限自动机，请改用回溯引擎`,
+          {
+            engine,
+            reason: 'backreference-requires-memory',
+          }
+        );
+      }
+      const r = matchAstBacktracking(ast, text, { mode, source: pattern });
+      res.json({ ok: true, ...stripFramesForTransport(r, 'backtracking') });
+      return;
+    }
+
     const { nfa, dfa, minDFA } = compile(pattern);
     let result;
-    if (engine === 'backtracking') result = matchBacktracking(nfa, String(input), { mode });
-    else if (engine === 'nfa') result = matchNFA(nfa, String(input));
-    else if (engine === 'dfa') result = matchDFA(dfa, String(input));
+    if (engine === 'backtracking') result = matchBacktracking(nfa, text, { mode });
+    else if (engine === 'nfa') result = matchNFA(nfa, text);
+    else if (engine === 'dfa') result = matchDFA(dfa, text);
     else if (engine === 'minDFA') {
       if (!minDFA) throw new Error('DFA 已截断，无法最小化');
-      result = matchDFA(minDFA, String(input));
+      result = matchDFA(minDFA, text);
     } else throw new Error(`未知引擎：${engine}`);
     res.json({ ok: true, ...stripFramesForTransport(result, engine) });
   }));
 
-  // 贪婪 vs 懒惰 并排对比
+  // 贪婪 vs 懒惰 并排对比（含反向引用时走 AST 回溯引擎）
   app.post('/api/compare-modes', wrap((req, res) => {
     const { pattern, input = '' } = req.body;
     if (typeof pattern !== 'string') throw new RegexSyntaxError('pattern 必须是字符串', 0);
-    const nfaGreedy = buildNFA(parsePattern(pattern), { mode: 'greedy' });
-    const nfaLazy = buildNFA(parsePattern(pattern), { mode: 'lazy' });
-    const greedy = matchBacktracking(nfaGreedy, String(input), { mode: 'greedy' });
-    const lazy = matchBacktracking(nfaLazy, String(input), { mode: 'lazy' });
+    const text = String(input);
+    const ast = parsePattern(pattern);
+    let greedy;
+    let lazy;
+    if (hasBackreferences(ast)) {
+      greedy = matchAstBacktracking(ast, text, { mode: 'greedy', source: pattern });
+      lazy = matchAstBacktracking(ast, text, { mode: 'lazy', source: pattern });
+    } else {
+      const nfaGreedy = buildNFA(ast, { mode: 'greedy' });
+      const nfaLazy = buildNFA(ast, { mode: 'lazy' });
+      greedy = matchBacktracking(nfaGreedy, text, { mode: 'greedy' });
+      lazy = matchBacktracking(nfaLazy, text, { mode: 'lazy' });
+    }
     res.json({
       ok: true,
+      nonDeterminizable: hasBackreferences(ast),
       greedy: stripFramesForTransport(greedy, 'backtracking'),
       lazy: stripFramesForTransport(lazy, 'backtracking'),
     });

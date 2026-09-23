@@ -4,8 +4,10 @@
 //   alternation := concat ('|' concat)*
 //   concat    := quantified*
 //   quantified := atom quantifier?
-//   atom      := '(' pattern ')' | '[' class ']' | '\\d' | literal | anchor
-// 产出带源码位置的 AST，量词记录 min/max/贪婪性，捕获组按出现顺序编号。
+//   atom      := '(' pattern ')' | '[' class ']' | '\\d' | '\\N' / '\\k<name>' | literal | anchor
+// 产出带源码位置的 AST，量词记录 min/max/贪婪性，捕获组按出现顺序编号
+// （命名捕获组 (?<name>...) 同时占一个编号）。反向引用在解析阶段完成
+// “目标存在性 + 自引用/前向引用”校验，非法时在反向引用位置抛语法错误。
 
 import { tokenize, RegexSyntaxError } from './lexer.js';
 import { makeNode, resetNodeIds } from './ast.js';
@@ -18,6 +20,9 @@ class Parser {
     this.src = src;
     this.i = 0;
     this.groupCount = 0;
+    this.groupByName = new Map(); // name -> index
+    this.openGroups = []; // 当前尚未闭合的捕获组 [{index, name}]
+    this.pendingBackrefs = []; // 解析时目标尚未注册的反向引用（闭合后再判定）
   }
 
   peek() {
@@ -31,7 +36,96 @@ class Parser {
     const pos = this.peek() ? this.peek().pos : 0;
     const end = this.src.length;
     const alt = this.parseAlternation(/* untilRParen */ false);
-    return makeNode('pattern', pos, end, { body: alt, groupCount: this.groupCount });
+    const ast = makeNode('pattern', pos, end, {
+      body: alt,
+      groupCount: this.groupCount,
+      groupNames: this.nameIndexMap(),
+    });
+    // 解析过程中目标尚未注册的反向引用：此刻所有分组都已注册，统一裁决
+    // （前向引用 vs 根本不存在）
+    for (const ref of this.pendingBackrefs) this.resolvePending(ref);
+    return ast;
+  }
+
+  nameIndexMap() {
+    const m = {};
+    for (const [name, index] of this.groupByName) m[name] = index;
+    return m;
+  }
+
+  describeRef(ref) {
+    return ref.refType === 'name' ? `\\k<${ref.refValue}>` : `\\${ref.refValue}`;
+  }
+
+  /** 反向引用的解析期校验（目标已存在时立即调用） */
+  checkBackref(t) {
+    if (t.refType === 'number') {
+      const num = t.refValue;
+      if (num > this.groupCount) {
+        // 可能是前向引用，也可能根本不存在：先挂起，parse() 末尾裁决
+        this.pendingBackrefs.push({ token: t });
+        return;
+      }
+      const self = this.openGroups.find((g) => g.index === num);
+      if (self) {
+        throw new RegexSyntaxError(
+          `反向引用 \\${num} 指向的第 ${num} 个捕获组此时还没有闭合：` +
+            `反向引用不能出现在它所引用的分组内部（自引用在回溯引擎里无法收敛）`,
+          t.pos,
+          t.end - t.pos
+        );
+      }
+    } else {
+      const name = t.refValue;
+      if (!this.groupByName.has(name)) {
+        this.pendingBackrefs.push({ token: t });
+        return;
+      }
+      const index = this.groupByName.get(name);
+      const self = this.openGroups.find((g) => g.index === index);
+      if (self) {
+        throw new RegexSyntaxError(
+          `反向引用 \\k<${name}> 指向命名捕获组 "${name}"，但该分组此时还没有闭合：` +
+            `反向引用不能出现在它所引用的分组内部（自引用在回溯引擎里无法收敛）`,
+          t.pos,
+          t.end - t.pos
+        );
+      }
+    }
+  }
+
+  /** 全部分组注册完毕后，裁决挂起的反向引用 */
+  resolvePending({ token: t }) {
+    if (t.refType === 'number') {
+      if (t.refValue > this.groupCount) {
+        throw new RegexSyntaxError(
+          `反向引用 \\${t.refValue} 不存在：整条正则只有 ${this.groupCount} 个捕获组`,
+          t.pos,
+          t.end - t.pos
+        );
+      }
+      // 编号已存在 → 解析时该组必然位于反向引用之后（前向引用）
+      throw new RegexSyntaxError(
+        `反向引用 \\${t.refValue} 出现在第 ${t.refValue} 个捕获组闭合之前：` +
+          '不能前向引用尚未闭合的分组（被引用的文本此刻还不存在）',
+        t.pos,
+        t.end - t.pos
+      );
+    }
+    const name = t.refValue;
+    if (!this.groupByName.has(name)) {
+      throw new RegexSyntaxError(
+        `反向引用 \\k<${name}> 不存在：正则中没有名为 "${name}" 的捕获组`,
+        t.pos,
+        t.end - t.pos
+      );
+    }
+    throw new RegexSyntaxError(
+      `反向引用 \\k<${name}> 出现在命名捕获组 "${name}" 闭合之前：` +
+        '不能前向引用尚未闭合的分组（被引用的文本此刻还不存在）',
+      t.pos,
+      t.end - t.pos
+    );
   }
 
   parseAlternation(untilRParen) {
@@ -172,6 +266,25 @@ class Parser {
         dot: !!t.dot,
       });
     }
+    if (t.kind === 'backref') {
+      this.next();
+      this.checkBackref(t);
+      // 数字引用在编号已存在时可直接定到目标组；具名引用同时记下编号
+      let index = null;
+      let name = null;
+      if (t.refType === 'number') {
+        index = t.refValue <= this.groupCount ? t.refValue : null;
+      } else {
+        name = t.refValue;
+        index = this.groupByName.get(name) ?? null;
+      }
+      return makeNode('backref', t.pos, t.end, {
+        refType: t.refType,
+        refValue: t.refValue,
+        index,
+        name,
+      });
+    }
     // 理论不可达
     this.next();
     throw new RegexSyntaxError(`无法识别的 token：${this.src.slice(t.pos, t.end)}`, t.pos, t.end - t.pos);
@@ -180,23 +293,39 @@ class Parser {
   parseGroup() {
     const open = this.next(); // lparen
     let index = null;
+    let name = null;
     if (open.capture) {
       this.groupCount += 1;
       index = this.groupCount;
+      if (open.name) {
+        name = open.name;
+        if (this.groupByName.has(name)) {
+          throw new RegexSyntaxError(
+            `命名捕获组的组名 "${name}" 重复：第 ${this.groupByName.get(name)} 组已经使用过这个名字，组名必须唯一`,
+            open.pos,
+            open.end - open.pos
+          );
+        }
+        this.groupByName.set(name, index);
+      }
+      // 入栈：该组闭合之前出现的反向引用可以检测“自引用/前向引用”
+      this.openGroups.push({ index, name });
     }
     const body = this.parseAlternation(true);
     const close = this.peek();
     if (!close || close.kind !== 'rparen') {
       throw new RegexSyntaxError(
-        `${open.capture ? '捕获组' : '非捕获组'}没有闭合：缺少右括号 )`,
+        `${open.name ? `命名捕获组 (?<${open.name}>...)` : open.capture ? '捕获组' : '非捕获组'}没有闭合：缺少右括号 )`,
         open.pos,
         open.end - open.pos
       );
     }
     this.next();
+    if (open.capture) this.openGroups.pop();
     return makeNode('group', open.pos, close.end, {
       capture: open.capture,
       index,
+      name,
       body,
     });
   }

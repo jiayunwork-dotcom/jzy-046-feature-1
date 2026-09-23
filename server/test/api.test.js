@@ -94,6 +94,44 @@ test('POST /api/analyze 报告 (a+)+ 危险', async () => {
   assert.ok(['exponential', 'quadratic-or-worse'].includes(json.analysis.classification));
 });
 
+test('POST /api/match 含反向引用：回溯引擎可用，NFA/DFA 引擎返回 409', async () => {
+  const pattern = String.raw`(\w+)\s+\1`;
+  const okRes = await post('/api/match', { pattern, input: 'go go', engine: 'backtracking' });
+  assert.equal(okRes.status, 200);
+  assert.equal(okRes.json.matched, true);
+  assert.ok(okRes.json.frames.some((f) => f.kind === 'backref-load'));
+
+  for (const engine of ['nfa', 'dfa', 'minDFA']) {
+    const r = await post('/api/match', { pattern, input: 'go go', engine });
+    assert.equal(r.status, 409, engine);
+    assert.equal(r.json.ok, false);
+    assert.equal(r.json.error.kind, 'EngineUnavailableError');
+    assert.equal(r.json.error.engine, engine);
+  }
+});
+
+test('POST /api/compile 含反向引用时三图为 null 且带 blockers', async () => {
+  const { status, json } = await post('/api/compile', {
+    pattern: String.raw`<(?<t>[a-z]+)>\k<t>`,
+    verifyStrings: ['xx'],
+  });
+  assert.equal(status, 200);
+  assert.equal(json.nonDeterminizable, true);
+  assert.equal(json.nfa, null);
+  assert.equal(json.dfa, null);
+  assert.equal(json.minDFA, null);
+  assert.equal(json.backrefs[0].ref, String.raw`\k<t>`);
+  assert.ok(json.backrefs[0].pos >= 0);
+  assert.equal(json.verification.applicable, false);
+});
+
+test('POST /api/match 反向引用语法错误仍按 400 返回并定位', async () => {
+  const { status, json } = await post('/api/match', { pattern: String.raw`(a)\2`, input: 'aa', engine: 'backtracking' });
+  assert.equal(status, 400);
+  assert.equal(json.ok, false);
+  assert.match(json.error.message, /只有 1 个捕获组/);
+});
+
 test('GET /api/examples 与详情', async () => {
   const list = await get('/api/examples');
   assert.ok(list.json.examples.length >= 5);

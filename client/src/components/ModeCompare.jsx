@@ -5,7 +5,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../state/api.js';
 import MatchPlayer from './MatchPlayer.jsx';
 
-export default function ModeCompare({ pattern, input, nfaGreedy, nfaLazy }) {
+export default function ModeCompare({ pattern, input, nfaGreedy, nfaLazy, blocked }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
@@ -26,18 +26,19 @@ export default function ModeCompare({ pattern, input, nfaGreedy, nfaLazy }) {
   if (err) return <div className="panel-empty warn">{err}</div>;
   if (!data) return null;
 
+  const kind = blocked ? 'backtracking-ref' : 'backtracking';
   return (
     <div className="mode-compare">
       <div className="compare-col">
         <div className="compare-head greedy">贪婪（greedy）</div>
         <MatchPlayer
           graph={nfaGreedy}
-          kind="backtracking"
+          kind={kind}
           frames={data.greedy.frames}
           metrics={data.greedy.metrics}
           input={input}
           result={data.greedy.result}
-          engineLabel="回溯引擎 · 贪婪"
+          engineLabel={blocked ? '回溯引擎（AST 直接匹配）· 贪婪' : '回溯引擎 · 贪婪'}
           height={360}
         />
       </div>
@@ -45,12 +46,12 @@ export default function ModeCompare({ pattern, input, nfaGreedy, nfaLazy }) {
         <div className="compare-head lazy">懒惰（lazy）</div>
         <MatchPlayer
           graph={nfaLazy}
-          kind="backtracking"
+          kind={kind}
           frames={data.lazy.frames}
           metrics={data.lazy.metrics}
           input={input}
           result={data.lazy.result}
-          engineLabel="回溯引擎 · 懒惰"
+          engineLabel={blocked ? '回溯引擎（AST 直接匹配）· 懒惰' : '回溯引擎 · 懒惰'}
           height={360}
         />
       </div>

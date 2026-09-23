@@ -9,29 +9,12 @@
 import { intersects } from '../charset.js';
 import { buildNFA } from '../nfa/thompson.js';
 import { matchBacktracking } from '../match/backtracker.js';
+import { matchAstBacktracking } from '../match/ast-backtracker.js';
+import { walkAst, hasBackreferences } from '../features.js';
 
 function walk(node, fn, parent = null) {
-  if (!node || typeof node !== 'object') return;
-  fn(node, parent);
-  switch (node.type) {
-    case 'pattern':
-      walk(node.body, fn, node);
-      break;
-    case 'concat':
-      node.items.forEach((c) => walk(c, fn, node));
-      break;
-    case 'alternation':
-      node.branches.forEach((b) => walk(b, fn, node));
-      break;
-    case 'repeat':
-      walk(node.atom, fn, node);
-      break;
-    case 'group':
-      walk(node.body, fn, node);
-      break;
-    default:
-      break;
-  }
+  // 委托给 features 的通用遍历（已覆盖 backref 节点）
+  walkAst(node, (n, p) => fn(n, p || parent));
 }
 
 function isUnbounded(node) {
@@ -67,6 +50,40 @@ function describeNode(ast, node) {
 
 export function staticAnalyze(ast, source) {
   const warnings = [];
+
+  // 情形 D：反向引用本身就是一种独立的爆炸来源，不能被“量词套量词”那套
+  // 静态判定代表。每次反向引用都要把已捕获文本整段重新扫一遍，且失败时
+  // 回溯会反复重抓、重比；若被引用分组又处在无界量词内部，捕获长度本身
+  // 在变化，代价远高于表面结构。
+  const backrefNodes = [];
+  walk(ast, (n) => {
+    if (n.type === 'backref') backrefNodes.push(n);
+  });
+  for (const ref of backrefNodes) {
+    // 危险度判定：反向引用本身 或 其引用目标所在的分组 处在无界量词内部
+    const refInUnbounded = ancestorUnboundedRepeats(ast, ref);
+    const targetGroup = findGroupNode(ast, resolveRefGroupIndex(ast, ref));
+    const targetInUnbounded = targetGroup ? ancestorUnboundedRepeats(ast, targetGroup) : 0;
+    const inUnbounded = Math.max(refInUnbounded, targetInUnbounded);
+    const notation = ref.refType === 'name' ? `\\k<${ref.refValue}>` : `\\${ref.refValue}`;
+    warnings.push({
+      kind: 'backreference',
+      severity: inUnbounded ? 'exponential' : 'risk',
+      pos: ref.pos,
+      end: ref.end,
+      title: inUnbounded
+        ? '无界量词内的反向引用：回溯代价被重复放大'
+        : '反向引用：每次都要重扫已捕获文本',
+      detail: inUnbounded
+        ? `反向引用 ${notation} 引用的捕获分组位于 ${inUnbounded} 层无界量词内部：量词的每一轮都会重新确定捕获文本，` +
+            '随后引擎又必须把这段（可能很长的）文本逐字符重新比对一遍；一旦末尾失配，所有切分方式连同所有比对全部重来，' +
+            '实际代价远高于表面上的“量词套量词”。反向引用依赖记忆，也无法用 DFA 线性匹配绕过。'
+        : `反向引用 ${notation} 不是普通的字符转移：引擎必须保存被引用分组抓到的文本，并在此处逐字符重新扫一遍。` +
+            '它的代价与已捕获长度成正比；当回溯反复重抓该分组时（如 (\\w+)\\1 失配输入），总代价是平方级甚至更高，' +
+            '且这是“带记忆”的匹配，超出 NFA/DFA 能力，无法切换到线性自动机规避。',
+      pattern: source.slice(ref.pos, ref.end),
+    });
+  }
 
   walk(ast, (node) => {
     if (!isUnbounded(node)) return;
@@ -160,7 +177,44 @@ function unwrapAlt(node) {
   return node && node.type === 'alternation' ? node : null;
 }
 
-/** 用串首锚点包装 AST：^(?:body)，强制探针只从位置 0 尝试一次 */
+/** 找出目标节点祖先链上的全部无界 repeat 节点（返回个数） */
+function ancestorUnboundedRepeats(root, target) {
+  let count = 0;
+  const stack = [{ node: root, unboundedAncestors: 0 }];
+  while (stack.length) {
+    const { node, unboundedAncestors } = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (node === target) { count = unboundedAncestors; break; }
+    const selfUnbounded = isUnbounded(node) ? 1 : 0;
+    for (const key of ['body', 'atom']) {
+      if (node[key]) stack.push({ node: node[key], unboundedAncestors: unboundedAncestors + selfUnbounded });
+    }
+    for (const key of ['items', 'branches']) {
+      if (Array.isArray(node[key])) {
+        node[key].forEach((c) => stack.push({ node: c, unboundedAncestors: unboundedAncestors + selfUnbounded }));
+      }
+    }
+  }
+  return count;
+}
+
+/** 反向引用节点 -> 被引用捕获组的编号 */
+function resolveRefGroupIndex(ast, ref) {
+  if (ref.refType === 'number') return ref.index;
+  return ast.groupNames?.[ref.refValue] ?? null;
+}
+
+/** 按编号找 group 节点 */
+function findGroupNode(root, index) {
+  if (index === null || index === undefined) return null;
+  let found = null;
+  walkAst(root, (n) => {
+    if (n.type === 'group' && n.capture && n.index === index && !found) found = n;
+  });
+  return found;
+}
+
+/** 用串首锚点包装 AST：^body，强制探针只从位置 0 尝试一次 */
 function wrapStartAnchor(ast) {
   return {
     ...ast,
@@ -204,13 +258,16 @@ function pickProbeChar(ast) {
  */
 export function empiricalProbe(ast, source, { lengths = [6, 9, 12, 15, 18] } = {}) {
   const ch = pickProbeChar(ast);
-  // 直接基于 AST 再包一层 ^：构造 ^(?:ast) 的 NFA
+  // 直接基于 AST 再包一层 ^，强制只从位置 0 尝试。
+  // 含反向引用的模式构造不出 NFA，探针改走 AST 回溯引擎。
   const wrapped = wrapStartAnchor(ast);
-  const nfa = buildNFA(wrapped);
+  const useAst = hasBackreferences(ast);
   const samples = [];
   for (const k of lengths) {
     const input = ch.repeat(k) + '\x00'; // 末尾塞一个几乎必不匹配的字符
-    const r = matchBacktracking(nfa, input, { stepCap: 500000 });
+    const r = useAst
+      ? matchAstBacktracking(wrapped, input, { stepCap: 500000, source: `^${source}` })
+      : matchBacktracking(buildNFA(wrapped), input, { stepCap: 500000 });
     samples.push({
       length: k + 1,
       attempts: r.metrics.edgeAttempts,

@@ -14,8 +14,10 @@ export default function ConstructionPlayer({ compileData, phase }) {
   const [speed, setSpeed] = useState(1);
   const timer = useRef(null);
 
+  const blocked = !!compileData?.nonDeterminizable;
+
   const model = useMemo(() => {
-    if (!compileData) return null;
+    if (!compileData || blocked) return null;
     if (phase === 'nfa') {
       return {
         kind: 'nfa',
@@ -39,7 +41,7 @@ export default function ConstructionPlayer({ compileData, phase }) {
       startId: compileData.minDFA?.start,
       symbols: compileData.minDFA?.symbols || [],
     };
-  }, [compileData, phase]);
+  }, [compileData, phase, blocked]);
 
   useEffect(() => { setStepIdx(0); setPlaying(false); }, [phase, compileData]);
 
@@ -60,6 +62,9 @@ export default function ConstructionPlayer({ compileData, phase }) {
     if (phase === 'dfa') return buildDFAFrame(compileData.dfa, stepIdx);
     return buildMinFrame(compileData.dfa, compileData.minDFA, stepIdx);
   }, [model, stepIdx, phase, compileData]);
+
+  // 含反向引用：NFA/DFA/最小化三步都不可确定化，给出明确说明而不是空白图
+  if (blocked) return <NonDeterminizablePanel compileData={compileData} phase={phase} />;
 
   if (!compileData) return <div className="panel-empty">输入一条合法正则后，这里开始构造。</div>;
   if (phase === 'min' && !compileData.minDFA) {
@@ -283,4 +288,38 @@ function StepExplain({ phase, step, compileData, frame, index, total }) {
 function rangeLabel(sym) {
   const cp = (c) => (c < 0x20 ? `\\x${c.toString(16)}` : String.fromCodePoint(c));
   return sym.hi - sym.lo === 1 ? cp(sym.lo) : `${cp(sym.lo)}-${cp(sym.hi - 1)}`;
+}
+
+// 含反向引用时替代三张自动机图的说明面板
+const PHASE_NAME = { nfa: 'NFA（Thompson 构造）', dfa: 'DFA（子集构造）', min: '最小化 DFA' };
+
+function NonDeterminizablePanel({ compileData, phase }) {
+  const refs = compileData.backrefs || [];
+  return (
+    <div className="nondet-panel">
+      <div className="nondet-head">
+        <span className="nondet-icon">⛔</span>
+        <div>
+          <div className="nondet-title">本阶段不可确定化：{PHASE_NAME[phase]} 未构造</div>
+          <div className="nondet-sub">
+            这条正则已超出有限自动机的能力范围，只能由<span className="nondet-hl">带回溯与捕获栈的引擎</span>执行。
+          </div>
+        </div>
+      </div>
+      <div className="nondet-refs">
+        <div className="nondet-refs-title">导致不可确定化的反向引用：</div>
+        {refs.map((r, i) => (
+          <div key={i} className="nondet-ref-item">
+            <code className="nondet-ref-code">{r.ref}</code>
+            <span className="muted small">位置 [{r.pos},{r.end})</span>
+            <div className="nondet-ref-reason">{r.reason}</div>
+          </div>
+        ))}
+      </div>
+      <div className="nondet-foot small muted">
+        三步状态：① NFA 未构造 → ② DFA 未构造 → ③ 最小化未进行。切换到下方“匹配演示 → 回溯引擎”可看到
+        反向引用如何从捕获栈取值并逐字符比对；NFA / DFA / 最小 DFA 引擎在该模式下不可选用。
+      </div>
+    </div>
+  );
 }

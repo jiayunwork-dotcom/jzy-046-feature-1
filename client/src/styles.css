@@ -221,3 +221,83 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
   .mode-compare { grid-template-columns: 1fr; }
   .perf-grid { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* ---- 反向引用：不可确定化面板 ---- */
+.nondet-panel {
+  border: 1px solid #9b6dff66; border-radius: 12px; background: linear-gradient(180deg, #1a1430, #12101f);
+  padding: 18px 20px; margin: 10px 0; min-height: 360px; display: flex; flex-direction: column; gap: 14px;
+}
+.nondet-head { display: flex; gap: 14px; align-items: flex-start; }
+.nondet-icon { font-size: 30px; line-height: 1; }
+.nondet-title { font-size: 16px; font-weight: 700; color: #d9c9ff; }
+.nondet-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.nondet-hl { color: #c9b3ff; font-weight: 600; }
+.nondet-refs { background: #0f0c1d; border: 1px solid #9b6dff44; border-radius: 10px; padding: 12px 14px; }
+.nondet-refs-title { font-size: 12.5px; color: #b8a6e8; margin-bottom: 8px; }
+.nondet-ref-item { padding: 8px 0; border-top: 1px dashed #9b6dff33; }
+.nondet-ref-item:first-of-type { border-top: none; }
+.nondet-ref-code {
+  color: #e6d9ff; background: #9b6dff22; border: 1px solid #9b6dff55;
+  border-radius: 5px; padding: 1px 8px; font-size: 13.5px; margin-right: 8px;
+}
+.nondet-ref-reason { color: var(--muted); font-size: 12.5px; margin-top: 6px; line-height: 1.6; }
+.nondet-foot { line-height: 1.7; }
+
+/* ---- 反向引用：回溯轨迹（无图） ---- */
+.backref-trace {
+  border: 1px solid var(--border); border-radius: 12px; background: #0d1424;
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+}
+.backref-trace.ref-active { border-color: #9b6dff88; box-shadow: 0 0 0 1px #9b6dff44 inset; }
+.trace-head { font-weight: 600; font-size: 13.5px; display: flex; gap: 10px; align-items: center; }
+.pill.ref { background: #9b6dff22; color: #c9b3ff; border: 1px solid #9b6dff66; }
+.trace-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; flex: 1; }
+.capture-stack, .ref-compare {
+  background: #0a1020; border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-height: 180px;
+}
+.capture-title { font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
+.capture-empty { padding: 8px 0; }
+.capture-item {
+  display: flex; gap: 10px; align-items: center; font-family: ui-monospace, monospace;
+  font-size: 13px; padding: 5px 8px; border-radius: 7px; background: #101a30; margin: 5px 0;
+}
+.capture-item.in-use { outline: 2px solid #9b6dff; background: #1d1640; }
+.capture-item.empty-cap { opacity: 0.75; }
+.capture-item.empty-cap .cap-text { color: #8fb59e; font-style: italic; }
+.cap-gname { color: #9db8e8; min-width: 90px; }
+.cap-text { color: #7fe0a8; flex: 1; word-break: break-all; }
+.cap-range { color: var(--muted); font-size: 11px; }
+.capture-note { font-size: 12px; margin-top: 8px; padding: 6px 8px; border-radius: 6px; }
+.capture-note.bad { color: #ffc4cb; background: #3a1620; border: 1px solid #ff4d5e55; }
+.capture-note.ok-note { color: #bdf2d2; background: #10291c; border: 1px solid #17c96455; }
+.ref-idle { padding: 8px; line-height: 1.7; }
+
+.ref-card { border-radius: 10px; padding: 14px; font-size: 13px; }
+.ref-card.load, .ref-card.pass { background: #16122e; border: 1px solid #9b6dff66; }
+.ref-card.fail { background: #2a121a; border: 1px solid #ff4d5e66; }
+.ref-card.unset { background: #2a121a; border: 1px solid #ff4d5e66; color: #ffc4cb; }
+.ref-card.empty { background: #10291c; border: 1px solid #17c96466; }
+.ref-card.empty .ref-line { color: #bdf2d2; }
+.ref-line { font-weight: 600; color: #d9c9ff; margin-bottom: 8px; }
+.ref-card.fail .ref-line { color: #ffc4cb; }
+.ref-value { font-family: ui-monospace, monospace; font-size: 18px; color: #c9b3ff; margin: 6px 0; word-break: break-all; }
+.ref-chars { display: flex; gap: 4px; flex-wrap: wrap; margin: 6px 0; }
+.rc {
+  font-family: ui-monospace, monospace; font-size: 16px; padding: 3px 8px;
+  border-radius: 6px; background: #101a30; color: var(--muted); border: 1px solid transparent;
+}
+.rc.done { color: #7fe0a8; }
+.rc.cur.good { color: #06210f; background: var(--ok); border-color: #b6ffd2; }
+.rc.cur.bad { color: #3a0710; background: var(--bad); border-color: #ffd2d8; }
+.trace-foot { border-top: 1px solid var(--border); padding-top: 6px; }
+
+/* 反向引用消息条：紫色区别于普通成功/失败 */
+.match-msg.ref { border-color: #9b6dff88; }
+.msg-kind.msg-ref { color: #c9b3ff; }
+.ast-badge.backref-badge { background: #34245f; color: #d9c9ff; }
+
+/* 引擎不可用标记 */
+.seg[disabled] .seg-na { display: block; font-size: 9.5px; color: #ff9aa5; line-height: 1.2; }
+.seg-na { display: none; }
+.engine-blocked-note { line-height: 1.7; }
+
